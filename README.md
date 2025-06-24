@@ -1,2 +1,2 @@
-# patternRecognition
+# PatternRecognition
 パターン認識特論のグループワークに用いるソースコード、データの格納場所
