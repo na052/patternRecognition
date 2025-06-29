@@ -30,7 +30,7 @@ from tensorflow.keras.regularizers import l2 # ★★★ L2正則化のために
 #--- 変数宣言 ---
 # 感情ラベルのリスト (6クラス)
 list_face_expression = ['happy', 'sad', 'neutral', 'fear', 'surprise', 'anger']
-img_shape = (144, 144, 3)
+img_shape = (96, 96, 3)
 batch_size = 128 # バッチサイズを変数として定義
 
 # データセットのベースパス (ユーザー指定の絶対パス)
@@ -95,9 +95,10 @@ y_test = to_categorical(y_test, num_classes=len(list_face_expression))
 print("\nSetting up data augmentation...")
 train_datagen = ImageDataGenerator(
     rescale=1./255,
-    rotation_range=20,
+    rotation_range=25,
     width_shift_range=0.1,
     height_shift_range=0.1,
+    brightness_range=[0.9, 1.1],
     shear_range=0.1,
     zoom_range=0.1,
     horizontal_flip=True,
@@ -108,37 +109,83 @@ train_generator = train_datagen.flow(X_train, y_train, batch_size=batch_size)
 X_test_normalized = X_test.astype('float32') / 255.0
 
 
-#--- モデル構築 ---
+# --- モデル構築 ---
 print("\nBuilding model...")
 input_tensor = Input(shape=img_shape)
+# VGG16のベースモデルをロード
 vgg16 = VGG16(include_top=False, weights='imagenet', input_tensor=input_tensor)
 
+# 分類器部分のモデルを定義
 sequential_model = Sequential()
 sequential_model.add(Flatten(input_shape=vgg16.output_shape[1:]))
-# ★★★ ここにL2正則化を適用 ★★★
-sequential_model.add(Dense(256, activation='relu', kernel_regularizer=l2(0.001)))
+sequential_model.add(Dense(256, activation='relu', kernel_regularizer=l2(0.003))) #過学習防止で0.001⇛0.003へ
 sequential_model.add(Dropout(rate=0.5))
 sequential_model.add(Dense(len(list_face_expression), activation='softmax'))
 
+# VGG16と分類器を連結
 model = Model(inputs=vgg16.input, outputs=sequential_model(vgg16.output))
 
-# VGG16のblock5以降を再学習可能にする（ファインチューニング）
-for layer in model.layers[:15]:
-    layer.trainable = False
-for layer in model.layers[15:]:
-    layer.trainable = True
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★
+# ★★★ エラー修正：steps_per_epoch をここで定義 ★★★
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★
+steps_per_epoch = math.ceil(train_generator.n / batch_size)
 
-model.compile(optimizer=optimizers.Adam(learning_rate=1e-4),
+
+# --- ステージ1：分類器の学習 ---
+print("\n--- Starting Stage 1: Training the classifier head ---")
+
+# VGG16ベースモデルの重みを凍結
+vgg16.trainable = False
+
+# 学習率1e-4でコンパイル
+model.compile(optimizer=optimizers.Adam(learning_rate=2e-4),
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
-model.summary()
+print("--- Layers' trainable status for Stage 1 ---")
+for layer in model.layers:
+    print(f"{layer.name}: {layer.trainable}")
+
+# 分類器のみを学習（エポック数は短めに設定）
+history_stage1 = model.fit(
+    train_generator,
+    steps_per_epoch=steps_per_epoch,  # ここで変数を使用
+    epochs= 10,
+    validation_data=(X_test_normalized, y_test),
+    verbose=1
+)
 
 
-#--- コールバックの定義 ---
+# --- ステージ2：ファインチューニング ---
+print("\n--- Starting Stage 2: Fine-tuning the model ---")
+
+# 【改善されたロジック】
+# VGG16自体は学習対象に設定
+vgg16.trainable = True
+
+# VGG16の内部レイヤーを直接操作し、block5より前の層を凍結する
+# 'block5_conv1'が見つかるまでループし、それより前のレイヤーを凍結
+fine_tune_start_layer_name = 'block5_conv1'
+for layer in vgg16.layers:
+    if layer.name == fine_tune_start_layer_name:
+        break
+    layer.trainable = False
+
+# 学習率1e-5で再コンパイル (★★最重要★★)
+model.compile(optimizer=optimizers.Adam(learning_rate=1e-5),
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+
+# 変更が正しく適用されたかを確認
+print("\n--- Layers' trainable status for Stage 2 ---")
+for layer in model.layers:
+    print(f"{layer.name}: {layer.trainable}")
+
+
+# コールバックの定義
 early_stopping = EarlyStopping(
     monitor='val_loss',
-    patience=10,
+    patience=50,
     verbose=1,
     restore_best_weights=True
 )
@@ -146,19 +193,16 @@ early_stopping = EarlyStopping(
 reduce_lr = ReduceLROnPlateau(
     monitor='val_loss',
     factor=0.5,
-    patience=2,
+    patience=8, #2から3へ？
     min_lr=1e-6,
     verbose=1
 )
 
-#--- 学習 ---
-print("\nStarting training with data augmentation...")
-steps_per_epoch = math.ceil(train_generator.n / batch_size)
-
+# モデル全体をファインチューニング
 history = model.fit(
     train_generator,
     steps_per_epoch=steps_per_epoch,
-    epochs=50,
+    epochs=100,
     validation_data=(X_test_normalized, y_test),
     verbose=1,
     callbacks=[early_stopping, reduce_lr]
