@@ -6,7 +6,6 @@ import matplotlib
 import tensorflow as tf
 # GUIがない環境でもエラーが出ないようにするための設定
 matplotlib.use('Agg')
-from tensorflow.keras.regularizers import l2 #過学習防止のl2正則化
 import matplotlib.pyplot as plt
 import random
 from tensorflow.keras import optimizers
@@ -17,11 +16,12 @@ from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.models import load_model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau # ★★★ 改善案2: コールバックをインポート ★★★
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l2 # ★★★ L2正則化のためにインポート ★★★
 
 # === 設定項目 ===
 # 1. 必要なライブラリをインストールしてください:
-#    pip install tensorflow opencv-python matplotlib numpy
+#    conda install -c conda-forge tensorflow opencv matplotlib numpy scipy
 #
 # 2. このスクリプトは、指定された絶対パスからデータを読み込みます。
 # =================
@@ -115,7 +115,8 @@ vgg16 = VGG16(include_top=False, weights='imagenet', input_tensor=input_tensor)
 
 sequential_model = Sequential()
 sequential_model.add(Flatten(input_shape=vgg16.output_shape[1:]))
-sequential_model.add(Dense(256, activation='relu'))
+# ★★★ ここにL2正則化を適用 ★★★
+sequential_model.add(Dense(256, activation='relu', kernel_regularizer=l2(0.001)))
 sequential_model.add(Dropout(rate=0.5))
 sequential_model.add(Dense(len(list_face_expression), activation='softmax'))
 
@@ -127,29 +128,26 @@ for layer in model.layers[:15]:
 for layer in model.layers[15:]:
     layer.trainable = True
 
-# ★★★ 修正点: model.compile()の構文エラーを修正 ★★★
-model.compile(optimizer=optimizers.Adam(learning_rate=1e-5),
+model.compile(optimizer=optimizers.Adam(learning_rate=1e-4),
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
 model.summary()
 
 
-# ★★★ 改善案2: コールバックの定義 ★★★
-# EarlyStopping: val_lossが10エポック連続で改善しなかったら学習を停止
+#--- コールバックの定義 ---
 early_stopping = EarlyStopping(
     monitor='val_loss',
     patience=10,
     verbose=1,
-    restore_best_weights=True # 最も性能が良かった時点の重みを復元
+    restore_best_weights=True
 )
 
-# ReduceLROnPlateau: val_lossが2エポック改善しなかったら学習率を0.5倍にする
 reduce_lr = ReduceLROnPlateau(
     monitor='val_loss',
     factor=0.5,
     patience=2,
-    min_lr=1e-6, # 学習率の下限
+    min_lr=1e-6,
     verbose=1
 )
 
@@ -160,10 +158,10 @@ steps_per_epoch = math.ceil(train_generator.n / batch_size)
 history = model.fit(
     train_generator,
     steps_per_epoch=steps_per_epoch,
-    epochs=50, # 多めに設定してもEarlyStoppingが自動で停止
+    epochs=50,
     validation_data=(X_test_normalized, y_test),
     verbose=1,
-    callbacks=[early_stopping, reduce_lr] # ★★★ 改善案2: コールバックを適用 ★★★
+    callbacks=[early_stopping, reduce_lr]
 )
 
 
