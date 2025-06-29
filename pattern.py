@@ -1,6 +1,12 @@
 import os
+import math
 import cv2
 import numpy as np
+import matplotlib
+import tensorflow as tf
+# GUIがない環境でもエラーが出ないようにするための設定
+matplotlib.use('Agg')
+from tensorflow.keras.regularizers import l2 #過学習防止のl2正則化
 import matplotlib.pyplot as plt
 import random
 from tensorflow.keras import optimizers
@@ -8,8 +14,10 @@ from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.layers import Dense, Dropout, Flatten, Input
 from tensorflow.keras.applications.vgg16 import VGG16
 from tensorflow.keras.models import Model, Sequential
-from tensorflow.keras.preprocessing import image
-from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import load_model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau # ★★★ 改善案2: コールバックをインポート ★★★
 
 # === 設定項目 ===
 # 1. 必要なライブラリをインストールしてください:
@@ -18,10 +26,12 @@ from tensorflow.keras.models import Sequential, load_model
 # 2. このスクリプトは、指定された絶対パスからデータを読み込みます。
 # =================
 
+
 #--- 変数宣言 ---
 # 感情ラベルのリスト (6クラス)
 list_face_expression = ['happy', 'sad', 'neutral', 'fear', 'surprise', 'anger']
-img_shape = (48, 48, 3)
+img_shape = (144, 144, 3)
+batch_size = 128 # バッチサイズを変数として定義
 
 # データセットのベースパス (ユーザー指定の絶対パス)
 # 環境に合わせて変更してください
@@ -47,9 +57,6 @@ def load_data_from_path(base_path, emotion_list):
         paths = os.listdir(expression_dir)
         print(f"Found {len(paths)} images for '{expression}'")
         
-        # (任意) 読み込むデータ件数を制限したい場合は、以下の行のコメントを解除
-        # paths = paths[:500] # 例: 各フォルダ500件に制限
-
         for path in paths:
             img_path = os.path.join(expression_dir, path)
             bgr_img = cv2.imread(img_path)
@@ -63,7 +70,7 @@ def load_data_from_path(base_path, emotion_list):
             rgb_img = cv2.merge([r, g, b])
             
             img_list.append(rgb_img)
-            label_list.append(i) # ラベルとして感情リストのインデックスを使用
+            label_list.append(i)
             
     return (np.array(img_list), np.array(label_list))
 
@@ -80,55 +87,96 @@ print(f"Training data shape: {X_train.shape}")
 print(f"Test data shape: {X_test.shape}")
 
 # 正解ラベルをone-hotエンコーディング
-# 例) 5 -> [0, 0, 0, 0, 0, 1]
 y_train = to_categorical(y_train, num_classes=len(list_face_expression))
 y_test = to_categorical(y_test, num_classes=len(list_face_expression))
 
+
+#--- データ拡張の準備 ---
+print("\nSetting up data augmentation...")
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    shear_range=0.1,
+    zoom_range=0.1,
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+train_generator = train_datagen.flow(X_train, y_train, batch_size=batch_size)
+X_test_normalized = X_test.astype('float32') / 255.0
+
+
 #--- モデル構築 ---
 print("\nBuilding model...")
-# VGG16モデル構築
 input_tensor = Input(shape=img_shape)
 vgg16 = VGG16(include_top=False, weights='imagenet', input_tensor=input_tensor)
 
-# 全結合層モデル構築
 sequential_model = Sequential()
 sequential_model.add(Flatten(input_shape=vgg16.output_shape[1:]))
-sequential_model.add(Dense(256, activation='relu')) # 活性化関数をReLUに変更
+sequential_model.add(Dense(256, activation='relu'))
 sequential_model.add(Dropout(rate=0.5))
-sequential_model.add(Dense(len(list_face_expression), activation='softmax')) # 出力層のユニット数をクラス数に合わせる
+sequential_model.add(Dense(len(list_face_expression), activation='softmax'))
 
-# VGG16モデルと全結合層モデルを結合
 model = Model(inputs=vgg16.input, outputs=sequential_model(vgg16.output))
 
-# VGG16モデルの重みを固定 (転移学習)
-for layer in model.layers[:19]:
+# VGG16のblock5以降を再学習可能にする（ファインチューニング）
+for layer in model.layers[:15]:
     layer.trainable = False
+for layer in model.layers[15:]:
+    layer.trainable = True
 
-# コンパイル
-model.compile(loss='categorical_crossentropy',
-              optimizer='adam',
+# ★★★ 修正点: model.compile()の構文エラーを修正 ★★★
+model.compile(optimizer=optimizers.Adam(learning_rate=1e-5),
+              loss='categorical_crossentropy',
               metrics=['accuracy'])
 
-# モデル構造表示
 model.summary()
 
+
+# ★★★ 改善案2: コールバックの定義 ★★★
+# EarlyStopping: val_lossが10エポック連続で改善しなかったら学習を停止
+early_stopping = EarlyStopping(
+    monitor='val_loss',
+    patience=10,
+    verbose=1,
+    restore_best_weights=True # 最も性能が良かった時点の重みを復元
+)
+
+# ReduceLROnPlateau: val_lossが2エポック改善しなかったら学習率を0.5倍にする
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.5,
+    patience=2,
+    min_lr=1e-6, # 学習率の下限
+    verbose=1
+)
+
 #--- 学習 ---
-print("\nStarting training...")
-history = model.fit(X_train, y_train, verbose=1, batch_size=64, epochs=25, validation_data=(X_test, y_test))
+print("\nStarting training with data augmentation...")
+steps_per_epoch = math.ceil(train_generator.n / batch_size)
+
+history = model.fit(
+    train_generator,
+    steps_per_epoch=steps_per_epoch,
+    epochs=50, # 多めに設定してもEarlyStoppingが自動で停止
+    validation_data=(X_test_normalized, y_test),
+    verbose=1,
+    callbacks=[early_stopping, reduce_lr] # ★★★ 改善案2: コールバックを適用 ★★★
+)
+
 
 #--- 評価と結果保存 ---
 print("\nEvaluating model...")
-# モデルの汎化精度評価
-scores = model.evaluate(X_test, y_test, verbose=1)
+scores = model.evaluate(X_test_normalized, y_test, verbose=1)
 print(f'Test loss: {scores[0]}')
 print(f'Test accuracy: {scores[1]}')
 
-# resultsディレクトリを作成
 result_dir = 'results'
 if not os.path.exists(result_dir):
     os.makedirs(result_dir)
 
-# エポック毎のモデル精度推移をプロットして保存
 plt.figure(figsize=(12, 5))
 plt.subplot(1, 2, 1)
 plt.plot(history.history["accuracy"], label="Training Accuracy", marker="o")
@@ -139,7 +187,6 @@ plt.xlabel("Epoch")
 plt.legend()
 plt.grid(True)
 
-# エポック毎の損失をプロットして保存
 plt.subplot(1, 2, 2)
 plt.plot(history.history["loss"], label="Training Loss", marker="o")
 plt.plot(history.history["val_loss"], label="Validation Loss", marker="x")
@@ -152,41 +199,40 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig(os.path.join(result_dir, 'training_history.png'))
 print(f"Training history graph saved to '{result_dir}/training_history.png'")
-#plt.show()
 
-
-# 重みを保存
 model_path = os.path.join(result_dir, 'emotion_model_vgg16.h5')
 model.save(model_path)
 print(f"Model saved to '{model_path}'")
 
+
 #--- 学習済みモデルを使った予測関数の例 ---
 def predict_emotion(model, img_array, classes):
-    # モデルの入力に合わせて画像を4次元配列に変換 (1, 48, 48, 3)
+    img_array = img_array.astype('float32') / 255.0
     img_array = np.expand_dims(img_array, axis=0)
-    # 予測確率を取得
+    
     pred_probabilities = model.predict(img_array)[0]
-    # 最も確率の高いインデックスを取得
     pred_index = np.argmax(pred_probabilities)
-    # 感情名と確率を返す
     return classes[pred_index], pred_probabilities[pred_index]
 
-# テストセットからランダムに画像を選んで予測を試す
 print("\n--- Prediction Example ---")
-random_index = random.randint(0, len(X_test) - 1)
-sample_image = X_test[random_index]
-true_label_index = np.argmax(y_test[random_index])
-true_label_name = list_face_expression[true_label_index]
+# テストデータが存在する場合のみ予測を実行
+if len(X_test) > 0:
+    random_index = random.randint(0, len(X_test) - 1)
+    sample_image = X_test[random_index]
+    true_label_index = np.argmax(y_test[random_index])
+    true_label_name = list_face_expression[true_label_index]
 
-# 予測実行
-predicted_label, confidence = predict_emotion(model, sample_image, list_face_expression)
+    predicted_label, confidence = predict_emotion(model, sample_image, list_face_expression)
 
-print(f"Predicted emotion: {predicted_label} (Confidence: {confidence:.2%})")
-print(f"True emotion: {true_label_name}")
+    print(f"Predicted emotion: {predicted_label} (Confidence: {confidence:.2%})")
+    print(f"True emotion: {true_label_name}")
 
-# 画像を表示
-plt.figure()
-plt.imshow(sample_image)
-plt.title(f"Predicted: {predicted_label} | True: {true_label_name}")
-plt.axis('off')
-plt.show()
+    plt.figure()
+    plt.imshow(sample_image)
+    plt.title(f"Predicted: {predicted_label} | True: {true_label_name}")
+    plt.axis('off')
+    # plt.show()の代わりにファイルに保存
+    plt.savefig(os.path.join(result_dir, 'prediction_example.png'))
+    print(f"Prediction example image saved to '{result_dir}/prediction_example.png'")
+else:
+    print("No test data to run prediction example.")
