@@ -119,7 +119,7 @@ vgg16 = VGG16(include_top=False, weights='imagenet', input_tensor=input_tensor)
 sequential_model = Sequential()
 sequential_model.add(Flatten(input_shape=vgg16.output_shape[1:]))
 sequential_model.add(Dense(256, activation='relu', kernel_regularizer=l2(0.003))) #過学習防止で0.001⇛0.003へ
-sequential_model.add(Dropout(rate=0.5))
+sequential_model.add(Dropout(rate=0.5)) 
 sequential_model.add(Dense(len(list_face_expression), activation='softmax'))
 
 # VGG16と分類器を連結
@@ -138,7 +138,7 @@ print("\n--- Starting Stage 1: Training the classifier head ---")
 vgg16.trainable = False
 
 # 学習率1e-4でコンパイル
-model.compile(optimizer=optimizers.Adam(learning_rate=2e-4),
+model.compile(optimizer=optimizers.Adam(learning_rate=1e-3),
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
