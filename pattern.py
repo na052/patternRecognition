@@ -1,280 +1,477 @@
 import os
+
 import math
+
 import cv2
+
 import numpy as np
+
 import matplotlib
-import tensorflow as tf
-# GUIがない環境でもエラーが出ないようにするための設定
+
 matplotlib.use('Agg')
+
 import matplotlib.pyplot as plt
-import random
-from tensorflow.keras import optimizers
+
+import tensorflow as tf
+
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.layers import Dense, Dropout, Flatten, Input
+
+from tensorflow.keras.layers import Dense, Dropout, Flatten, Input, BatchNormalization, Activation #BN追加
+
 from tensorflow.keras.applications.vgg16 import VGG16
-from tensorflow.keras.models import Model, Sequential
+
+from tensorflow.keras.models import Model
+
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.models import load_model
+
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.regularizers import l2 # ★★★ L2正則化のためにインポート ★★★
+
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, LearningRateScheduler
+
+from tensorflow.keras.regularizers import l2
+
+from sklearn.model_selection import train_test_split # ★ train_test_splitをインポート
+
+from datetime import datetime
+
+from sklearn.metrics import classification_report, confusion_matrix # ★★★ 追加 ★★★
+
+
 
 # === 設定項目 ===
-# 1. 必要なライブラリをインストールしてください:
-#    conda install -c conda-forge tensorflow opencv matplotlib numpy scipy
-#
-# 2. このスクリプトは、指定された絶対パスからデータを読み込みます。
-# =================
 
-
-#--- 変数宣言 ---
-# 感情ラベルのリスト (6クラス)
 list_face_expression = ['happy', 'sad', 'neutral', 'fear', 'surprise', 'anger']
+
 img_shape = (96, 96, 3)
-batch_size = 128 # バッチサイズを変数として定義
 
-# データセットのベースパス (ユーザー指定の絶対パス)
-# 環境に合わせて変更してください
-train_base_path = '/home/eito/codes/pattern/dataset/Train'
-test_base_path = '/home/eito/codes/pattern/dataset/Test'
+batch_size = 128
 
 
-#--- 画像とラベルを読み込む関数 ---
+
+data_root = '/home/eito/codes/pattern/dataset'
+
+train_base_path = os.path.join(data_root, 'Train')
+
+test_base_path = os.path.join(data_root, 'Test')
+
+
+
+# === 画像とラベルを読み込む関数 ===
+
 def load_data_from_path(base_path, emotion_list):
-    """指定されたベースパスから画像とラベルを読み込む"""
-    img_list = []
-    label_list = []
-    print(f"--- Loading data from: {base_path} ---")
-    for i, expression in enumerate(emotion_list):
-        # 各感情のディレクトリパス
-        expression_dir = os.path.join(base_path, expression)
-        
-        # ディレクトリが存在するかチェック
-        if not os.path.isdir(expression_dir):
-            print(f"警告: ディレクトリが見つかりません: {expression_dir}。スキップします。")
-            continue
 
-        paths = os.listdir(expression_dir)
-        print(f"Found {len(paths)} images for '{expression}'")
-        
-        for path in paths:
-            img_path = os.path.join(expression_dir, path)
-            bgr_img = cv2.imread(img_path)
-            if bgr_img is None:
-                print(f"警告: 画像が読み込めませんでした: {img_path}。スキップします。")
-                continue
-            
-            # 画像のリサイズと色チャンネルの並び替え (BGR -> RGB)
-            bgr_img = cv2.resize(bgr_img, img_shape[:2])
-            b, g, r = cv2.split(bgr_img)
-            rgb_img = cv2.merge([r, g, b])
-            
-            img_list.append(rgb_img)
-            label_list.append(i)
-            
-    return (np.array(img_list), np.array(label_list))
+    img_list, label_list = [], []
 
-#--- データ読み込みと前処理 ---
-try:
-    X_train, y_train = load_data_from_path(train_base_path, list_face_expression)
-    X_test, y_test = load_data_from_path(test_base_path, list_face_expression)
-except Exception as e:
-    print(f"データ読み込み中にエラーが発生しました: {e}")
-    exit()
+    for i, expr in enumerate(emotion_list):
 
-print("\n--- Data Summary ---")
-print(f"Training data shape: {X_train.shape}")
-print(f"Test data shape: {X_test.shape}")
+        dir_path = os.path.join(base_path, expr)
 
-# 正解ラベルをone-hotエンコーディング
-y_train = to_categorical(y_train, num_classes=len(list_face_expression))
-y_test = to_categorical(y_test, num_classes=len(list_face_expression))
+        if not os.path.isdir(dir_path):
+
+            print(f"警告: ディレクトリが見つかりません: {dir_path}")
+
+            continue
+
+        for fname in os.listdir(dir_path):
+
+            path = os.path.join(dir_path, fname)
+
+            img = cv2.imread(path)
+
+            if img is None:
+
+                print(f"警告: 画像が読み込めませんでした: {path}")
+
+                continue
+
+            img = cv2.resize(img, img_shape[:2])
+
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            img_list.append(img)
+
+            label_list.append(i)
+
+    return np.array(img_list), np.array(label_list)
 
 
-#--- データ拡張の準備 ---
-print("\nSetting up data augmentation...")
+
+# === データ読み込みと前処理 ===
+
+X_train_full, y_train_full_idx = load_data_from_path(train_base_path, list_face_expression)
+
+X_test, y_test_idx = load_data_from_path(test_base_path, list_face_expression)
+
+print(f"Total training samples: {X_train_full.shape[0]}, Test samples: {X_test.shape[0]}")
+
+
+
+y_train_full = to_categorical(y_train_full_idx, num_classes=len(list_face_expression))
+
+y_test = to_categorical(y_test_idx, num_classes=len(list_face_expression))
+
+X_test = X_test.astype('float32') / 255.0
+
+
+
+# ★ 学習データを90%の訓練データと10%の検証データに分割
+
+X_train, X_val, y_train, y_val = train_test_split(
+
+    X_train_full,
+
+    y_train_full,
+
+    test_size=0.1,      # 10%を検証データとして使用
+
+    random_state=42,    # 再現性のための乱数シード
+
+    stratify=y_train_full_idx # 元のラベル比率を維持して分割
+
+)
+
+print(f"-> Split into {X_train.shape[0]} training samples and {X_val.shape[0]} validation samples.")
+
+
+
+
+
+# === データ拡張設定 ===
+
 train_datagen = ImageDataGenerator(
-    rescale=1./255,
-    rotation_range=25,
-    width_shift_range=0.1,
-    height_shift_range=0.1,
-    brightness_range=[0.9, 1.1],
-    shear_range=0.1,
-    zoom_range=0.1,
-    horizontal_flip=True,
-    fill_mode='nearest'
-)
 
-train_generator = train_datagen.flow(X_train, y_train, batch_size=batch_size)
-X_test_normalized = X_test.astype('float32') / 255.0
+    rescale=1./255,
 
+    rotation_range=25,
 
-# --- モデル構築 ---
-print("\nBuilding model...")
-input_tensor = Input(shape=img_shape)
-# VGG16のベースモデルをロード
-vgg16 = VGG16(include_top=False, weights='imagenet', input_tensor=input_tensor)
+    width_shift_range=0.1,
 
-# 分類器部分のモデルを定義
-sequential_model = Sequential()
-sequential_model.add(Flatten(input_shape=vgg16.output_shape[1:]))
-sequential_model.add(Dense(256, activation='relu', kernel_regularizer=l2(0.003))) #過学習防止で0.001⇛0.003へ
-sequential_model.add(Dropout(rate=0.5)) 
-sequential_model.add(Dense(len(list_face_expression), activation='softmax'))
+    height_shift_range=0.1,
 
-# VGG16と分類器を連結
-model = Model(inputs=vgg16.input, outputs=sequential_model(vgg16.output))
+    brightness_range=[0.9,1.1],
 
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★
-# ★★★ エラー修正：steps_per_epoch をここで定義 ★★★
-# ★★★★★★★★★★★★★★★★★★★★★★★★★★★
-steps_per_epoch = math.ceil(train_generator.n / batch_size)
+    shear_range=0.1,
 
+    zoom_range=0.1,
 
-# --- ステージ1：分類器の学習 ---
-print("\n--- Starting Stage 1: Training the classifier head ---")
+    horizontal_flip=True,
 
-# VGG16ベースモデルの重みを凍結
-vgg16.trainable = False
+    fill_mode='nearest'
 
-# 学習率1e-4でコンパイル
-model.compile(optimizer=optimizers.Adam(learning_rate=1e-3),
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
-
-print("--- Layers' trainable status for Stage 1 ---")
-for layer in model.layers:
-    print(f"{layer.name}: {layer.trainable}")
-
-# 分類器のみを学習（エポック数は短めに設定）
-history_stage1 = model.fit(
-    train_generator,
-    steps_per_epoch=steps_per_epoch,  # ここで変数を使用
-    epochs= 10,
-    validation_data=(X_test_normalized, y_test),
-    verbose=1
 )
 
 
-# --- ステージ2：ファインチューニング ---
-print("\n--- Starting Stage 2: Fine-tuning the model ---")
 
-# 【改善されたロジック】
-# VGG16自体は学習対象に設定
-vgg16.trainable = True
+# === モデル構築関数 ===
 
-# VGG16の内部レイヤーを直接操作し、block5より前の層を凍結する
-# 'block5_conv1'が見つかるまでループし、それより前のレイヤーを凍結
-fine_tune_start_layer_name = 'block5_conv1'
-for layer in vgg16.layers:
-    if layer.name == fine_tune_start_layer_name:
-        break
-    layer.trainable = False
+def build_model():
 
-# 学習率1e-5で再コンパイル (★★最重要★★)
-model.compile(optimizer=optimizers.Adam(learning_rate=1e-5),
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
+    input_tensor = Input(shape=img_shape)
 
-# 変更が正しく適用されたかを確認
-print("\n--- Layers' trainable status for Stage 2 ---")
-for layer in model.layers:
-    print(f"{layer.name}: {layer.trainable}")
+    base = VGG16(include_top=False, weights='imagenet', input_tensor=input_tensor)
+
+    base.trainable = False
+
+    x = Flatten()(base.output)
+
+    x = Dense(256, activation='relu', kernel_regularizer=l2(0.005))(x) #256-128
 
 
-# コールバックの定義
-early_stopping = EarlyStopping(
-    monitor='val_loss',
-    patience=50,
-    verbose=1,
-    restore_best_weights=True
+
+    # Batch Normalizationを適用
+
+    x = BatchNormalization()(x)
+
+    # 活性化関数を適用
+
+    x = Activation('relu')(x)
+
+    # ★★★ ここまでが変更部分 ★★★
+
+
+
+    x = Dropout(0.5)(x)#変更する可能性あり
+
+    output = Dense(len(list_face_expression), activation='softmax')(x)
+
+    model = Model(inputs=base.input, outputs=output)
+
+    return model, base
+
+
+
+# === Stage1用 学習率スケジュール ===
+
+def lr_schedule_stage1(epoch, lr):
+
+    return 2e-4 if epoch < 5 else 1e-4
+
+
+
+# ★★★ 交差検証ループを削除し、単一の学習プロセスに変更 ★★★
+
+
+
+# === 学習準備 ===
+
+train_gen = train_datagen.flow(X_train, y_train, batch_size=batch_size)
+
+steps_per_epoch = math.ceil(len(X_train) / batch_size)
+
+X_val_normalized = X_val.astype('float32') / 255.0 # 検証データは正規化のみ
+
+
+
+model, base_model = build_model()
+
+loss_fn = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.012)
+
+
+
+# === Stage 1: ヘッド部分の学習 ===
+
+print("\n--- Stage 1: Training Head ---")
+
+model.compile(optimizer=Adam(learning_rate=3e-4), loss=loss_fn, metrics=['accuracy'])
+
+model.fit(
+
+    train_gen,
+
+    steps_per_epoch=steps_per_epoch,
+
+    epochs=10,
+
+    validation_data=(X_val_normalized, y_val),
+
+    callbacks=[LearningRateScheduler(lr_schedule_stage1, verbose=1)],
+
+    verbose=1
+
 )
 
-reduce_lr = ReduceLROnPlateau(
-    monitor='val_loss',
-    factor=0.5,
-    patience=8, #2から3へ？
-    min_lr=1e-6,
-    verbose=1
-)
 
-# モデル全体をファインチューニング
+
+# === Stage 2: ファインチューニング ===
+
+print("\n--- Stage 2: Fine-tuning ---")
+
+base_model.trainable = True
+
+freeze_until = 'block5_conv1'
+
+set_trainable = False
+
+for layer in base_model.layers:
+
+    if layer.name == freeze_until:
+
+        set_trainable = True
+
+    layer.trainable = set_trainable
+
+
+
+model.compile(optimizer=Adam(learning_rate=1e-5), loss= loss_fn, metrics=['accuracy'])
+
 history = model.fit(
-    train_generator,
-    steps_per_epoch=steps_per_epoch,
-    epochs=100,
-    validation_data=(X_test_normalized, y_test),
-    verbose=1,
-    callbacks=[early_stopping, reduce_lr]
+
+    train_gen,
+
+    steps_per_epoch=steps_per_epoch,
+
+    epochs=80,
+
+    validation_data=(X_val_normalized, y_val),
+
+    callbacks=[
+
+        EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
+
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
+
+    ],
+
+    verbose=1
+
 )
 
 
-#--- 評価と結果保存 ---
-print("\nEvaluating model...")
-scores = model.evaluate(X_test_normalized, y_test, verbose=1)
-print(f'Test loss: {scores[0]}')
-print(f'Test accuracy: {scores[1]}')
 
-result_dir = 'results'
-if not os.path.exists(result_dir):
-    os.makedirs(result_dir)
 
-plt.figure(figsize=(12, 5))
-plt.subplot(1, 2, 1)
-plt.plot(history.history["accuracy"], label="Training Accuracy", marker="o")
-plt.plot(history.history["val_accuracy"], label="Validation Accuracy", marker="x")
-plt.title("Model Accuracy")
-plt.ylabel("Accuracy")
-plt.xlabel("Epoch")
-plt.legend()
-plt.grid(True)
 
-plt.subplot(1, 2, 2)
-plt.plot(history.history["loss"], label="Training Loss", marker="o")
-plt.plot(history.history["val_loss"], label="Validation Loss", marker="x")
-plt.title("Model Loss")
-plt.ylabel("Loss")
-plt.xlabel("Epoch")
-plt.legend()
-plt.grid(True)
+# === 最終評価と保存 ===
+
+print(f"\n{'='*20} Final Evaluation {'='*20}")
+
+
+
+# 検証データでの最終評価
+
+val_loss, val_acc = model.evaluate(X_val_normalized, y_val, verbose=0)
+
+print(f"Final Validation Accuracy: {val_acc:.4f}")
+
+
+
+# テストデータでの総合的な最終評価
+
+test_loss, test_acc = model.evaluate(X_test, y_test, verbose=1)
+
+print(f"\nFinal Test Accuracy (Overall): {test_acc:.4f}")
+
+
+
+# テストデータに対する予測を実行
+
+y_pred_prob = model.predict(X_test)
+
+y_pred = np.argmax(y_pred_prob, axis=1) # 確率が最も高いクラスのインデックスを取得
+
+
+
+# --- 感情ごとの性能評価レポート ---
+
+print("\n--- Classification Report (Emotion-wise Performance) ---")
+
+# y_test_idx は one-hotエンコード前の整数ラベル
+
+# recall が各感情の「正答率」に相当します
+
+print(classification_report(y_test_idx, y_pred, target_names=list_face_expression))
+
+
+
+
+
+# --- 混同行列の作成と可視化 ---
+
+cm = confusion_matrix(y_test_idx, y_pred)
+
+
+
+plt.figure(figsize=(10, 8))
+
+plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+
+plt.title('Confusion Matrix')
+
+plt.colorbar()
+
+tick_marks = np.arange(len(list_face_expression))
+
+plt.xticks(tick_marks, list_face_expression, rotation=45)
+
+plt.yticks(tick_marks, list_face_expression)
+
+
+
+# 行列内に数値を書き込む
+
+thresh = cm.max() / 2.
+
+for i in range(cm.shape[0]):
+
+    for j in range(cm.shape[1]):
+
+        plt.text(j, i, format(cm[i, j], 'd'),
+
+                 horizontalalignment="center",
+
+                 color="white" if cm[i, j] > thresh else "black")
+
+
+
+plt.ylabel('True label')
+
+plt.xlabel('Predicted label')
 
 plt.tight_layout()
-plt.savefig(os.path.join(result_dir, 'training_history.png'))
-print(f"Training history graph saved to '{result_dir}/training_history.png'")
-
-model_path = os.path.join(result_dir, 'emotion_model_vgg16.h5')
-model.save(model_path)
-print(f"Model saved to '{model_path}'")
 
 
-#--- 学習済みモデルを使った予測関数の例 ---
-def predict_emotion(model, img_array, classes):
-    img_array = img_array.astype('float32') / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
-    
-    pred_probabilities = model.predict(img_array)[0]
-    pred_index = np.argmax(pred_probabilities)
-    return classes[pred_index], pred_probabilities[pred_index]
 
-print("\n--- Prediction Example ---")
-# テストデータが存在する場合のみ予測を実行
-if len(X_test) > 0:
-    random_index = random.randint(0, len(X_test) - 1)
-    sample_image = X_test[random_index]
-    true_label_index = np.argmax(y_test[random_index])
-    true_label_name = list_face_expression[true_label_index]
+# 結果保存ディレクトリの作成
 
-    predicted_label, confidence = predict_emotion(model, sample_image, list_face_expression)
+os.makedirs('results', exist_ok=True)
 
-    print(f"Predicted emotion: {predicted_label} (Confidence: {confidence:.2%})")
-    print(f"True emotion: {true_label_name}")
 
-    plt.figure()
-    plt.imshow(sample_image)
-    plt.title(f"Predicted: {predicted_label} | True: {true_label_name}")
-    plt.axis('off')
-    # plt.show()の代わりにファイルに保存
-    plt.savefig(os.path.join(result_dir, 'prediction_example.png'))
-    print(f"Prediction example image saved to '{result_dir}/prediction_example.png'")
-else:
-    print("No test data to run prediction example.")
+
+# 現在時刻を "YYYYMMDD_HHMMSS" の形式で取得
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+
+# 混同行列のプロットを保存
+
+confusion_matrix_filename = f'results/confusion_matrix_{timestamp}.png'
+
+plt.savefig(confusion_matrix_filename)
+
+print(f"\nConfusion matrix plot saved to {confusion_matrix_filename}")
+
+
+
+
+
+# モデルファイル名とプロットファイル名にタイムスタンプを追加
+
+model_filename = f'results/emotion_model_{timestamp}.h5'
+
+plot_filename = f'results/training_history_{timestamp}.png'
+
+
+
+model.save(model_filename)
+
+print(f"Model saved to {model_filename}")
+
+
+
+# 学習履歴のプロット
+
+training_history = history.history
+
+plt.figure(figsize=(12,5))
+
+plt.subplot(1,2,1)
+
+plt.plot(training_history['accuracy'], marker='o', label='train_acc')
+
+plt.plot(training_history['val_accuracy'], marker='x', label='val_acc')
+
+plt.title('Accuracy')
+
+plt.xlabel('Epoch')
+
+plt.ylabel('Accuracy')
+
+plt.legend()
+
+plt.grid(True)
+
+
+
+plt.subplot(1,2,2)
+
+plt.plot(training_history['loss'], marker='o', label='train_loss')
+
+plt.plot(training_history['val_loss'], marker='x', label='val_loss')
+
+plt.title('Loss')
+
+plt.xlabel('Epoch')
+
+plt.ylabel('Loss')
+
+plt.legend()
+
+plt.grid(True)
+
+
+
+plt.tight_layout()
+
+plt.savefig(plot_filename)
+
+print(f"Training history plot saved to {plot_filename}")
