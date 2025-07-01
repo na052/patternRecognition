@@ -2,7 +2,11 @@ import os
 
 import math
 
+import random
+
 import cv2
+
+import csv
 
 import numpy as np
 
@@ -16,7 +20,7 @@ import tensorflow as tf
 
 from tensorflow.keras.utils import to_categorical
 
-from tensorflow.keras.layers import Dense, Dropout, Flatten, Input, BatchNormalization, Activation #BN追加
+from tensorflow.keras.layers import Dense, Dropout, Flatten, Input, BatchNormalization, Activation
 
 from tensorflow.keras.applications.vgg16 import VGG16
 
@@ -30,11 +34,23 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, Learnin
 
 from tensorflow.keras.regularizers import l2
 
-from sklearn.model_selection import train_test_split # ★ train_test_splitをインポート
+from sklearn.model_selection import train_test_split
 
 from datetime import datetime
 
-from sklearn.metrics import classification_report, confusion_matrix # ★★★ 追加 ★★★
+from sklearn.metrics import classification_report, confusion_matrix
+
+
+
+# === 乱数シード固定 ===
+
+SEED = 42
+
+random.seed(SEED)
+
+np.random.seed(SEED)
+
+tf.random.set_seed(SEED)
 
 
 
@@ -114,25 +130,21 @@ X_test = X_test.astype('float32') / 255.0
 
 
 
-# ★ 学習データを90%の訓練データと10%の検証データに分割
-
 X_train, X_val, y_train, y_val = train_test_split(
 
     X_train_full,
 
     y_train_full,
 
-    test_size=0.1,      # 10%を検証データとして使用
+    test_size=0.1,
 
-    random_state=42,    # 再現性のための乱数シード
+    random_state=SEED,
 
-    stratify=y_train_full_idx # 元のラベル比率を維持して分割
+    stratify=y_train_full_idx
 
 )
 
 print(f"-> Split into {X_train.shape[0]} training samples and {X_val.shape[0]} validation samples.")
-
-
 
 
 
@@ -174,23 +186,13 @@ def build_model():
 
     x = Flatten()(base.output)
 
-    x = Dense(256, activation='relu', kernel_regularizer=l2(0.005))(x) #256-128
-
-
-
-    # Batch Normalizationを適用
+    x = Dense(256, activation='relu', kernel_regularizer=l2(0.005))(x)
 
     x = BatchNormalization()(x)
 
-    # 活性化関数を適用
-
     x = Activation('relu')(x)
 
-    # ★★★ ここまでが変更部分 ★★★
-
-
-
-    x = Dropout(0.5)(x)#変更する可能性あり
+    x = Dropout(0.5)(x)
 
     output = Dense(len(list_face_expression), activation='softmax')(x)
 
@@ -200,7 +202,7 @@ def build_model():
 
 
 
-# === Stage1用 学習率スケジュール ===
+#step1の学習率
 
 def lr_schedule_stage1(epoch, lr):
 
@@ -208,270 +210,282 @@ def lr_schedule_stage1(epoch, lr):
 
 
 
-# ★★★ 交差検証ループを削除し、単一の学習プロセスに変更 ★★★
+# === パラメータチューニングのメインロジック ===
 
 
 
-# === 学習準備 ===
+weight_patterns = [
 
-train_gen = train_datagen.flow(X_train, y_train, batch_size=batch_size)
+    (1.0, 1.0, 1.0),
 
-steps_per_epoch = math.ceil(len(X_train) / batch_size)
+    (1.1, 1.1, 1.1),
 
-X_val_normalized = X_val.astype('float32') / 255.0 # 検証データは正規化のみ
+    (1.1, 1.2, 1.1),
 
+]
 
 
-model, base_model = build_model()
 
-loss_fn = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.012)
+results_dir = 'results'
 
+os.makedirs(results_dir, exist_ok=True)
 
 
-# === Stage 1: ヘッド部分の学習 ===
 
-print("\n--- Stage 1: Training Head ---")
+# ★★★ ここからが変更点 ★★★
 
-model.compile(optimizer=Adam(learning_rate=3e-4), loss=loss_fn, metrics=['accuracy'])
+session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-model.fit(
+csv_log_path = os.path.join(results_dir, f'tuning_log_{session_timestamp}.csv')
 
-    train_gen,
+# ★★★ ここまでが変更点 ★★★
 
-    steps_per_epoch=steps_per_epoch,
 
-    epochs=10,
 
-    validation_data=(X_val_normalized, y_val),
+with open(csv_log_path, 'w', newline='') as f:
 
-    callbacks=[LearningRateScheduler(lr_schedule_stage1, verbose=1)],
+    writer = csv.writer(f)
 
-    verbose=1
+    writer.writerow(['fear_w', 'surprise_w', 'anger_w', 'val_accuracy', 'val_loss', 'test_accuracy', 'test_loss', 'run_timestamp'])
 
-)
 
 
+for w_fear, w_surprise, w_anger in weight_patterns:
 
-# === Stage 2: ファインチューニング ===
+    print(f"\n{'='*40}")
 
-print("\n--- Stage 2: Fine-tuning ---")
+    print(f"  STARTING RUN FOR WEIGHTS: fear={w_fear}, surprise={w_surprise}, anger={w_anger}")
 
-base_model.trainable = True
+    print(f"{'='*40}\n")
 
-freeze_until = 'block5_conv1'
 
-set_trainable = False
 
-for layer in base_model.layers:
+    tf.keras.backend.clear_session()
 
-    if layer.name == freeze_until:
+    model, base_model = build_model()
 
-        set_trainable = True
+    loss_fn = tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.012)
 
-    layer.trainable = set_trainable
 
 
+    train_gen = train_datagen.flow(X_train, y_train, batch_size=batch_size, shuffle=True, seed=SEED)
 
-model.compile(optimizer=Adam(learning_rate=1e-5), loss= loss_fn, metrics=['accuracy'])
+    steps_per_epoch = math.ceil(len(X_train) / batch_size)
 
-history = model.fit(
+    X_val_normalized = X_val.astype('float32') / 255.0
 
-    train_gen,
 
-    steps_per_epoch=steps_per_epoch,
 
-    epochs=80,
+    print("\n--- Stage 1: Training Head ---")
 
-    validation_data=(X_val_normalized, y_val),
+    model.compile(optimizer=Adam(learning_rate=3e-4), loss=loss_fn, metrics=['accuracy'])
 
-    callbacks=[
+    model.fit(
 
-        EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
+        train_gen,
 
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
+        steps_per_epoch=steps_per_epoch,
 
-    ],
+        epochs=12,
 
-    verbose=1
+        validation_data=(X_val_normalized, y_val),
 
-)
+        callbacks=[LearningRateScheduler(lr_schedule_stage1, verbose=0)],
 
+        verbose=1
 
+    )
 
 
 
-# === 最終評価と保存 ===
+    print("\n--- Stage 2: Fine-tuning ---")
 
-print(f"\n{'='*20} Final Evaluation {'='*20}")
+    base_model.trainable = True
 
+    freeze_until = 'block4_conv1' # 例としてblock4からファインチューニング
 
+    set_trainable = False
 
-# 検証データでの最終評価
+    for layer in base_model.layers:
 
-val_loss, val_acc = model.evaluate(X_val_normalized, y_val, verbose=0)
+        if layer.name == freeze_until:
 
-print(f"Final Validation Accuracy: {val_acc:.4f}")
+            set_trainable = True
 
+        layer.trainable = set_trainable
 
 
-# テストデータでの総合的な最終評価
 
-test_loss, test_acc = model.evaluate(X_test, y_test, verbose=1)
+    model.compile(optimizer=Adam(learning_rate=1e-5), loss=loss_fn, metrics=['accuracy'])
 
-print(f"\nFinal Test Accuracy (Overall): {test_acc:.4f}")
+    class_weights = { 0: 1.0, 1: 1.0, 2: 1.0, 3: w_fear, 4: w_surprise, 5: w_anger }
 
+    print("\nApplying custom class weights:")
 
+    print(class_weights)
 
-# テストデータに対する予測を実行
 
-y_pred_prob = model.predict(X_test)
 
-y_pred = np.argmax(y_pred_prob, axis=1) # 確率が最も高いクラスのインデックスを取得
+    history = model.fit(
 
+        train_gen,
 
+        steps_per_epoch=steps_per_epoch,
 
-# --- 感情ごとの性能評価レポート ---
+        epochs=80,
 
-print("\n--- Classification Report (Emotion-wise Performance) ---")
+        class_weight=class_weights,
 
-# y_test_idx は one-hotエンコード前の整数ラベル
+        validation_data=(X_val_normalized, y_val),
 
-# recall が各感情の「正答率」に相当します
+        callbacks=[
 
-print(classification_report(y_test_idx, y_pred, target_names=list_face_expression))
+            EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
 
+            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6)
 
+        ],
 
+        verbose=1
 
+    )
 
-# --- 混同行列の作成と可視化 ---
 
-cm = confusion_matrix(y_test_idx, y_pred)
 
+    print(f"\n--- Final Evaluation for weights ({w_fear}, {w_surprise}, {w_anger}) ---")
 
+    val_loss, val_acc = model.evaluate(X_val_normalized, y_val, verbose=0)
 
-plt.figure(figsize=(10, 8))
+    test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
 
-plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    print(f"  Validation -> Accuracy: {val_acc:.4f}, Loss: {val_loss:.4f}")
 
-plt.title('Confusion Matrix')
+    print(f"  Test       -> Accuracy: {test_acc:.4f}, Loss: {test_loss:.4f}")
 
-plt.colorbar()
 
-tick_marks = np.arange(len(list_face_expression))
 
-plt.xticks(tick_marks, list_face_expression, rotation=45)
+    y_pred_prob = model.predict(X_test)
 
-plt.yticks(tick_marks, list_face_expression)
+    y_pred = np.argmax(y_pred_prob, axis=1)
 
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    param_str = f"fear{w_fear}_surp{w_surprise}_ang{w_anger}".replace('.', '_')
 
-# 行列内に数値を書き込む
 
-thresh = cm.max() / 2.
 
-for i in range(cm.shape[0]):
+    print("\n--- Classification Report ---")
 
-    for j in range(cm.shape[1]):
+    print(classification_report(y_test_idx, y_pred, target_names=list_face_expression))
 
-        plt.text(j, i, format(cm[i, j], 'd'),
 
-                 horizontalalignment="center",
 
-                 color="white" if cm[i, j] > thresh else "black")
+    cm = confusion_matrix(y_test_idx, y_pred)
 
+    plt.figure(figsize=(10, 8))
 
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
 
-plt.ylabel('True label')
+    plt.title(f'Confusion Matrix (weights: {w_fear}, {w_surprise}, {w_anger})')
 
-plt.xlabel('Predicted label')
+    plt.colorbar()
 
-plt.tight_layout()
+    tick_marks = np.arange(len(list_face_expression))
 
+    plt.xticks(tick_marks, list_face_expression, rotation=45)
 
+    plt.yticks(tick_marks, list_face_expression)
 
-# 結果保存ディレクトリの作成
+    thresh = cm.max() / 2.
 
-os.makedirs('results', exist_ok=True)
+    for i in range(cm.shape[0]):
 
+        for j in range(cm.shape[1]):
 
+            plt.text(j, i, format(cm[i, j], 'd'),
 
-# 現在時刻を "YYYYMMDD_HHMMSS" の形式で取得
+                     horizontalalignment="center",
 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                     color="white" if cm[i, j] > thresh else "black")
 
+    plt.ylabel('True label')
 
+    plt.xlabel('Predicted label')
 
-# 混同行列のプロットを保存
+    plt.tight_layout()
 
-confusion_matrix_filename = f'results/confusion_matrix_{timestamp}.png'
+    confusion_matrix_filename = os.path.join(results_dir, f'cm_{param_str}_{run_timestamp}.png')
 
-plt.savefig(confusion_matrix_filename)
+    plt.savefig(confusion_matrix_filename)
 
-print(f"\nConfusion matrix plot saved to {confusion_matrix_filename}")
+    plt.close()
 
 
 
+    training_history = history.history
 
+    plt.figure(figsize=(12,5))
 
-# モデルファイル名とプロットファイル名にタイムスタンプを追加
+    plt.subplot(1, 2, 1)
 
-model_filename = f'results/emotion_model_{timestamp}.h5'
+    plt.plot(training_history['accuracy'], marker='o', label='train_accuracy')
 
-plot_filename = f'results/training_history_{timestamp}.png'
+    plt.plot(training_history['val_accuracy'], marker='x', label='val_accuracy')
 
+    plt.title('Model Accuracy')
 
+    plt.xlabel('Epoch')
 
-model.save(model_filename)
+    plt.ylabel('Accuracy')
 
-print(f"Model saved to {model_filename}")
+    plt.legend()
 
+    plt.grid(True)
 
+    plt.subplot(1, 2, 2)
 
-# 学習履歴のプロット
+    plt.plot(training_history['loss'], marker='o', label='train_loss')
 
-training_history = history.history
+    plt.plot(training_history['val_loss'], marker='x', label='val_loss')
 
-plt.figure(figsize=(12,5))
+    plt.title('Model Loss')
 
-plt.subplot(1,2,1)
+    plt.xlabel('Epoch')
 
-plt.plot(training_history['accuracy'], marker='o', label='train_acc')
+    plt.ylabel('Loss')
 
-plt.plot(training_history['val_accuracy'], marker='x', label='val_acc')
+    plt.legend()
 
-plt.title('Accuracy')
+    plt.grid(True)
 
-plt.xlabel('Epoch')
+    plt.tight_layout()
 
-plt.ylabel('Accuracy')
+    plot_filename = os.path.join(results_dir, f'history_{param_str}_{run_timestamp}.png')
 
-plt.legend()
+    plt.savefig(plot_filename)
 
-plt.grid(True)
+    plt.close()
 
 
 
-plt.subplot(1,2,2)
+    model_filename = os.path.join(results_dir, f'model_{param_str}_{run_timestamp}.h5')
 
-plt.plot(training_history['loss'], marker='o', label='train_loss')
+    model.save(model_filename)
 
-plt.plot(training_history['val_loss'], marker='x', label='val_loss')
 
-plt.title('Loss')
 
-plt.xlabel('Epoch')
+    with open(csv_log_path, 'a', newline='') as f:
 
-plt.ylabel('Loss')
+        writer = csv.writer(f)
 
-plt.legend()
+        writer.writerow([w_fear, w_surprise, w_anger, val_acc, val_loss, test_acc, test_loss, run_timestamp])
 
-plt.grid(True)
 
 
+    print(f"--- Finished run for weights ({w_fear}, {w_surprise}, {w_anger}). Results saved. ---")
 
-plt.tight_layout()
 
-plt.savefig(plot_filename)
 
-print(f"Training history plot saved to {plot_filename}")
+print("\nAll hyperparameter tuning runs are complete!")
+
+print(f"Check the summary at: {csv_log_path}")
